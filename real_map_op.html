@@ -1,0 +1,801 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Global Route Animator — Car/Walk/Bike + Train/Subway + Air</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Leaflet CSS (fallback x2) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
+  <style>
+    html,body,#map{height:100%;margin:0}
+    .ui{
+      position:fixed; top:16px; left:16px; z-index:1000;
+      display:flex; flex-direction:column; gap:10px; align-items:flex-start;
+      background:rgba(0,0,0,.45); padding:12px; border-radius:12px;
+      color:#fff; font-family:system-ui, sans-serif; backdrop-filter:blur(4px);
+      min-width: 600px;
+    }
+    .row{display:flex; gap:8px; width:100%; flex-wrap:wrap; align-items:center;}
+    .row label{font-size:12px; opacity:.9}
+    .ui input, .ui select{
+      padding:8px 10px; border-radius:8px; border:0; outline:none;
+      background:#fff; color:#111;
+    }
+    .ui input[type="range"]{ width:240px; background:transparent; }
+    .ui button{ border:0; padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:600 }
+    .ui button:disabled{opacity:.5; cursor:not-allowed}
+    .build{background:#3498db; color:#fff}
+    .start{background:#2ecc71; color:#111}
+    .pause{background:#f1c40f; color:#111}
+    .reset{background:#e74c3c; color:#fff}
+    .toggle{background:#95a5a6; color:#111}
+    .status{margin-left:auto; opacity:.9; font-size:12px}
+    .hidden { display:none !important; }
+
+    /* 촬영용 숨김 모드 */
+    body.hide-chrome .ui{ display:none !important; }
+    body.hide-chrome .leaflet-control-attribution,
+    body.hide-chrome .leaflet-control-zoom{ display:none !important; }
+    #showUiBtn{
+      position:fixed; top:12px; left:12px; z-index:1001;
+      padding:6px 10px; border-radius:8px; border:0; cursor:pointer;
+      background:rgba(0,0,0,.45); color:#fff; display:none;
+    }
+    body.hide-chrome #showUiBtn{ display:block; }
+
+    /* 합성 마커(사진 + 이모지) */
+    .stack-marker{ pointer-events:none; text-shadow:0 0 4px rgba(0,0,0,.35); will-change: transform; }
+    .stack-marker .emoji{ font-size:24px; line-height:24px; text-align:center; }
+    .stack-marker .photo{
+      display:block; margin:0 auto 2px; border-radius:50%;
+      border:2px solid rgba(255,255,255,.9); box-shadow:0 2px 6px rgba(0,0,0,.35);
+      object-fit:cover;
+    }
+
+    /* 미니 컨트롤: UI 숨김 모드에서만 보임 */
+    #miniControls, #miniControls * { pointer-events:auto; }
+    #miniControls{
+      position:fixed; top:12px; left:90px; z-index:1001;
+      display:none; gap:6px; background:rgba(0,0,0,.35);
+      padding:6px; border-radius:8px; backdrop-filter:blur(3px);
+    }
+    #miniControls button{
+      border:0; padding:5px 8px; border-radius:6px; cursor:pointer; font-weight:600
+    }
+    #miniControls .g{ background:#3498db; color:#fff }  /* Build */
+    #miniControls .s{ background:#2ecc71; color:#111 }  /* Start */
+    #miniControls .p{ background:#f1c40f; color:#111 }  /* Pause/Resume */
+    #miniControls .r{ background:#e74c3c; color:#fff }  /* Reset */
+    body.hide-chrome #miniControls{ display:flex; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- UI 패널 -->
+<div class="ui" id="panel">
+  <div class="row">
+    <label>Overlay photo</label>
+    <input id="overlayUrl" placeholder="https://... (optional)" size="36">
+    <label>Size</label>
+    <input id="overlaySize" type="number" min="12" max="96" step="1" value="28" style="width:70px">
+    <input id="startInput" placeholder="Start: '48.8584, 2.2945' or 'Eiffel Tower, Paris'" size="36">
+    <input id="endInput"   placeholder="End:   '51.5007, -0.1246' or 'Big Ben, London'"  size="36">
+    <select id="mode">
+      <option value="driving" selected>Driving (car) — OSRM</option>
+      <option value="walking">Walking — OSRM</option>
+      <option value="cycling">Cycling — OSRM</option>
+      <option value="train_auto">Train (auto OSM rails)</option>
+      <option value="train_osm">Train (by name, OSM rails)</option>
+      <option value="train_gc">Train (great-circle)</option>
+      <option value="subway_auto">Subway/Metro (auto OSM)</option>
+      <option value="subway_osm">Subway/Metro (by name, OSM)</option>
+      <option value="air">Airplane (great-circle)</option>
+    </select>
+    <input id="railLineName" placeholder="OSM line name (e.g., Gyeongbu Line / Elizabeth line / Yamanote Line)" style="min-width:340px; display:none">
+    <button id="btnBuild" class="build">Build Route</button>
+  </div>
+
+  <div class="row">
+    <label>Speed</label>
+    <input id="speedRange" type="range" min="1" max="1000000" step="1">
+    <input id="speedNumber" type="number" min="1" max="1000000" step="1" style="width:84px">
+    <span>km/h</span>
+    <button id="btnStart" class="start" disabled>Start</button>
+    <button id="btnPause" class="pause" disabled>Pause</button>
+    <button id="btnReset" class="reset" disabled>Reset</button>
+    <button id="btnHide"  class="toggle">Hide UI</button>
+    <span id="status" class="status">Enter start/end and click “Build Route”.</span>
+  </div>
+
+  <div class="row">
+    <label>Marker</label>
+    <select id="markerType">
+      <option value="emoji" selected>Emoji</option>
+      <option value="url">Image URL</option>
+    </select>
+    <select id="markerEmoji">
+      <option value="auto" selected>Auto by mode</option>
+      <option value="🚗">🚗 Car</option>
+      <option value="🚶">🚶 Walk</option>
+      <option value="🚴">🚴 Bike</option>
+      <option value="🚄">🚄 Train</option>
+      <option value="🚇">🚇 Subway</option>
+      <option value="✈️">✈️ Airplane</option>
+      <option value="📍">📍 Pin</option>
+    </select>
+    <input id="markerUrl" class="hidden" placeholder="https://example.com/your-icon.png" size="36">
+  </div>
+</div>
+
+<button id="showUiBtn">Show UI</button>
+
+<!-- 미니 컨트롤 -->
+<div id="miniControls">
+  <button id="miniStart" class="s">Start</button>
+  <button id="miniPause" class="p">Pause</button>
+  <button id="miniReset" class="r">Reset</button>
+  <button id="miniBuild" class="g">Build</button>
+</div>
+
+<!-- Leaflet JS (3-step fallback loader) -->
+<script>
+(function loadLeaflet(cb){
+  const tries=[
+    "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js",
+    "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"
+  ];
+  (function next(i){
+    if(i>=tries.length) return cb(new Error("Leaflet load failed"));
+    const s=document.createElement('script'); s.src=tries[i]; s.async=true;
+    s.onload=()=>cb(null); s.onerror=()=>next(i+1); document.head.appendChild(s);
+  })(0);
+})(function(err){ if(err){ alert("Leaflet load failed"); } else if(window.L){ init(); } });
+
+function init(){
+  // ===== 기본 속도(km/h) =====
+  const DEFAULT_SPEEDS = {
+    driving:50, walking:5, cycling:20,
+    train_auto:180, train_osm:180, train_gc:180,
+    subway_auto:60, subway_osm:60,
+    air:850
+  };
+
+  // ===== UI =====
+  const startInput = document.getElementById('startInput');
+  const endInput   = document.getElementById('endInput');
+  const modeSel    = document.getElementById('mode');
+  const railLine   = document.getElementById('railLineName');
+  const btnBuild   = document.getElementById('btnBuild');
+  const btnStart   = document.getElementById('btnStart');
+  const btnPause   = document.getElementById('btnPause');
+  const btnReset   = document.getElementById('btnReset');
+  const btnHide    = document.getElementById('btnHide');
+  const showUiBtn  = document.getElementById('showUiBtn');
+  const statusEl   = document.getElementById('status');
+  const speedRange = document.getElementById('speedRange');
+  const speedNumber= document.getElementById('speedNumber');
+  const markerType = document.getElementById('markerType');
+  const markerEmoji= document.getElementById('markerEmoji');
+  const markerUrl  = document.getElementById('markerUrl');
+  const overlayUrl  = document.getElementById('overlayUrl');
+  const overlaySize = document.getElementById('overlaySize');
+  const miniStart = document.getElementById('miniStart');
+  const miniPause = document.getElementById('miniPause');
+  const miniReset = document.getElementById('miniReset');
+  const miniBuild = document.getElementById('miniBuild');
+
+  // 프리셋
+  startInput.value = "Eiffel Tower, Paris";
+  endInput.value   = "Big Ben, London";
+
+  // ===== 지도 + 타일(폴백) + Canvas 렌더러 =====
+  const canvasRenderer = L.canvas({ padding: 0.2 });
+  const map = L.map('map', { zoomSnap:0, preferCanvas:true }).setView([48.8584,2.2945], 13);
+
+  // 베이스: OSM.de (선/경계/라벨 비교적 또렷)
+  const osmde = L.tileLayer(
+    'https://{s}.tile.openstreetmap.de/tiles/osmde/{z}/{x}/{y}.png',
+    {
+      maxZoom:19,
+      attribution:'&copy; OpenStreetMap contributors, tiles &copy; openstreetmap.de',
+      detectRetina:true, updateWhenIdle:true, updateWhenZooming:false, keepBuffer:2
+    }
+  ).addTo(map);
+
+  // 폴백: OSM 기본
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom:19, attribution:'&copy; OpenStreetMap' });
+  osmde.on('tileerror', ()=>{ if(!map.hasLayer(osm)) osm.addTo(map); });
+
+  // ===== 유틸 =====
+  function parseLatLngStrict(text){
+    let t = String(text||'').trim()
+      .replace(/[^\d\-\+.,;\s=:]/g,' ')
+      .replace(/latitude|lat\s*[:=]/ig,'')
+      .replace(/longitude|lon|lng\s*[:=]/ig,'');
+    if (!t.includes('.') && (t.match(/,/g)||[]).length >= 2) t = t.replace(/,/g,'.');
+    const nums = (t.match(/[-+]?\d+(?:\.\d+)?/g)||[]).map(Number);
+    if (nums.length < 2) return null;
+    const lat = nums[0], lng = nums[1];
+    if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng, label: `${lat}, ${lng}` };
+    return null;
+  }
+  async function toLatLngFlexible(inputText){
+    const parsed = parseLatLngStrict(inputText);
+    if (parsed) return parsed;
+    const url=`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(inputText)}&format=json&limit=1`;
+    const res = await fetch(url, { headers:{ "Accept-Language":"en" }});
+    const data = await res.json();
+    if (!data.length) throw new Error(`Geocoding failed: ${inputText}`);
+    const { lat, lon, display_name } = data[0];
+    return { lat:+lat, lng:+lon, label: display_name };
+  }
+
+  // OSRM 간단 캐시
+  const routeCache = new Map();
+  async function fetchRouteOSRM(profile, s, e){
+    const key = `${profile}|${s.lat.toFixed(5)},${s.lng.toFixed(5)}|${e.lat.toFixed(5)},${e.lng.toFixed(5)}`;
+    if (routeCache.has(key)) return routeCache.get(key);
+    const coords = `${s.lng},${s.lat};${e.lng},${e.lat}`;
+    const url = `https://router.project-osrm.org/route/v1/${profile}/${coords}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.routes?.length) throw new Error("OSRM route failed");
+    const geo = data.routes[0].geometry.coordinates;
+    routeCache.set(key, geo);
+    return geo;
+  }
+
+  function haversine([lat1,lng1],[lat2,lng2]){
+    const R=6371000, toRad=x=>x*Math.PI/180;
+    const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1);
+    const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+    return 2*R*Math.asin(Math.sqrt(a));
+  }
+  const clamp01=t=>Math.max(0,Math.min(1,t));
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  const lerp2=(A,B,t)=>[lerp(A[0],B[0],t), lerp(A[1],B[1],t)];
+
+  function waitForMoveEndOrTimeout(ms = 800){
+    return new Promise(resolve => {
+      let done = false;
+      const onEnd = () => { if (!done){ done = true; map.off('moveend', onEnd); resolve(); } };
+      map.once('moveend', onEnd);
+      setTimeout(onEnd, ms);
+    });
+  }
+
+  // 경로 다운샘플링 (거리 기반)
+  function decimateLine(latlngs, minStepM = 60){
+    if (latlngs.length <= 2) return latlngs;
+    const out=[latlngs[0]]; let acc=0;
+    for (let i=0;i<latlngs.length-1;i++){
+      const a=latlngs[i], b=latlngs[i+1];
+      const d=haversine(a,b);
+      acc += d;
+      if (acc >= minStepM){ out.push(b); acc=0; }
+    }
+    if (out.at(-1)!==latlngs.at(-1)) out.push(latlngs.at(-1));
+    return out;
+  }
+
+  // 대권(지구 곡선)
+  function greatCircleRoute(s, e){
+    const toRad = d => d*Math.PI/180, toDeg = r => r*180/Math.PI;
+    const lat1=toRad(s.lat), lon1=toRad(s.lng);
+    const lat2=toRad(e.lat), lon2=toRad(e.lng);
+    const d = 2*Math.asin(Math.sqrt( Math.sin((lat2-lat1)/2)**2 +
+                                      Math.cos(lat1)*Math.cos(lat2)*Math.sin((lon2-lon1)/2)**2 ));
+    if (d===0) return [[s.lat, s.lng]];
+    const km = (d*6371000)/1000;
+    const N = Math.max(64, Math.min(1024, Math.ceil(km/10)*4));
+    const sinD = Math.sin(d);
+    const result=[];
+    for(let i=0;i<=N;i++){
+      const t = i/N;
+      const A = Math.sin((1-t)*d)/sinD;
+      const B = Math.sin(t*d)/sinD;
+      const x = A*Math.cos(lat1)*Math.cos(lon1) + B*Math.cos(lat2)*Math.cos(lon2);
+      const y = A*Math.cos(lat1)*Math.sin(lon1) + B*Math.cos(lat2)*Math.sin(lon2);
+      const z = A*Math.sin(lat1) + B*Math.sin(lat2);
+      const lat = Math.atan2(z, Math.hypot(x,y));
+      const lon = Math.atan2(y, x);
+      result.push([ toDeg(lat), toDeg(lon) ]);
+    }
+    return result;
+  }
+
+  // ==== Overpass (다중 엔드포인트 폴백) ====
+  async function fetchOverpass(query){
+    const endpoints = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.osm.ch/api/interpreter'
+    ];
+    let lastErr;
+    for (const ep of endpoints){
+      try{
+        const res = await fetch(ep+'?data='+encodeURIComponent(query), { method:'GET' });
+        if (!res.ok) throw new Error(res.status+' '+res.statusText);
+        return await res.json();
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error('Overpass request failed');
+  }
+
+  // ====== (NEW) 역/정류장으로 스냅 ======
+  async function snapToNearestStation(lat, lng, kind='main'){
+    const filter = (kind==='urban')
+      ? 'station|halt|stop|subway|subway_entrance|tram_stop'
+      : 'station|halt|stop';
+    const q = `
+      [out:json][timeout:25];
+      (
+        node(around:2500,${lat},${lng})["railway"~"${filter}"];
+        way (around:2500,${lat},${lng})["railway"~"${filter}"];
+      );
+      out center;`;
+    try{
+      const d = await fetchOverpass(q.trim());
+      if (!d.elements?.length) return { lat, lng };
+      let best = null, bestD = 1e12;
+      for (const el of d.elements){
+        const c = el.center || el;
+        const dd = (c.lat-lat)**2 + (c.lon-lng)**2;
+        if (dd < bestD){ bestD = dd; best = { lat:c.lat, lng:c.lon }; }
+      }
+      return best || { lat, lng };
+    }catch(e){ return { lat, lng }; }
+  }
+
+  // ====== relation 후보 탐색 (개선된 필터) ======
+  async function fetchRailRelationsNearPoint(lat, lng, radius, kind){
+    const routeFilter = (kind==='urban')
+      ? 'subway|light_rail|tram|metro'
+      : 'train|light_rail|railway';  // 일부 데이터 보정용 railway 포함
+    const q = `
+      [out:json][timeout:60];
+      way(around:${radius},${lat},${lng})["railway"~"rail|light_rail|subway|tram"]["service"!~"yard|siding|spur"];
+      rel(bw)["route"~"${routeFilter}"];
+      out tags;`;
+    const data = await fetchOverpass(q.trim());
+    return (data.elements || []).filter(el => el.type === 'relation');
+  }
+
+  // ====== (NEW) relation 멤버 순서로 라인 조립 ======
+  async function fetchRailLineByRelIdOrdered(relId){
+    const q = `
+      [out:json][timeout:60];
+      rel(${relId});
+      out ids tags;
+      >;
+      out body geom;`;
+    const data = await fetchOverpass(q.trim());
+    const rel = (data.elements || []).find(e => e.type==='relation' && e.id==relId);
+    if (!rel) throw new Error('Relation not found: '+relId);
+
+    const wayMap = new Map();
+    for (const el of data.elements){
+      if (el.type==='way' && el.geometry){
+        wayMap.set(el.id, el.geometry.map(g=>[g.lat,g.lon]));
+      }
+    }
+    const seq = [];
+    for (const m of (rel.members || [])){
+      if (m.type==='way' && wayMap.has(m.ref)){
+        seq.push(wayMap.get(m.ref));
+      }
+    }
+    const out = [];
+    const pushSeg = (seg)=>{
+      if (!seg?.length) return;
+      if (!out.length){ out.push(...seg); return; }
+      const a = out[out.length-1], b0 = seg[0], b1 = seg[seg.length-1];
+      const d0 = (a[0]-b0[0])**2 + (a[1]-b0[1])**2;
+      const d1 = (a[0]-b1[0])**2 + (a[1]-b1[1])**2;
+      const s = d0<=d1 ? seg : seg.slice().reverse();
+      if (a[0]===s[0][0] && a[1]===s[0][1]) out.push(...s.slice(1)); else out.push(...s);
+    };
+    seq.forEach(pushSeg);
+    if (out.length < 2) throw new Error('Relation assemble failed');
+    return out;
+  }
+
+  // ===== ways → 하나의 폴리라인 (이름검색용 기존 함수 유지) =====
+  function assemblePolylineFromWays(ways){
+    const key = (p)=> `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+    const segments = ways.map(w => w.geometry.map(g => [g.lat, g.lon]));
+    const adj = new Map();
+    function pushAdj(pt, info){
+      const k = key({lat:pt[0], lon:pt[1]});
+      if(!adj.has(k)) adj.set(k, []);
+      adj.get(k).push(info);
+    }
+    segments.forEach((seg,i)=>{ pushAdj(seg[0],{i}); pushAdj(seg.at(-1),{i}); });
+
+    let startKey=null;
+    for(const [k,arr] of adj.entries()){ if(arr.length===1){ startKey=k; break; } }
+    if(!startKey) startKey = adj.keys().next().value;
+
+    const used=new Array(segments.length).fill(false);
+    const path=[]; let curKey=startKey;
+
+    for(let step=0; step<segments.length; step++){
+      const options = adj.get(curKey) || [];
+      let pick=null;
+      for(const opt of options){ if(!used[opt.i]){ pick=opt; break; } }
+      if(!pick) break;
+
+      let seg=segments[pick.i]; used[pick.i]=true;
+      const headK=key({lat:seg[0][0], lon:seg[0][1]});
+      const tailK=key({lat:seg.at(-1)[0], lon:seg.at(-1)[1]});
+      if (headK===curKey){ seg=seg.slice().reverse(); }
+
+      if(!path.length) path.push(...seg);
+      else {
+        const last=path.at(-1), first=seg[0];
+        if (last[0]===first[0] && last[1]===first[1]) path.push(...seg.slice(1));
+        else path.push(...seg);
+      }
+      const newTail=seg.at(-1);
+      curKey=key({lat:newTail[0], lon:newTail[1]});
+    }
+    if (path.length<2) throw new Error('Failed to assemble polyline from ways.');
+    return path;
+  }
+
+  // ===== 라인을 시작/끝으로 클리핑 =====
+  function clipPolylineByNearest(polyline, startLL, endLL){
+    function idxNearest(pt){
+      let idx=0, best=1e9;
+      for(let i=0;i<polyline.length;i++){
+        const d=(polyline[i][0]-pt.lat)**2 + (polyline[i][1]-pt.lng)**2;
+        if(d<best){ best=d; idx=i; }
+      }
+      return idx;
+    }
+    let a = idxNearest(startLL), b = idxNearest(endLL);
+    if (a>b){ const t=a; a=b; b=t; }
+    const sliced = polyline.slice(a, b+1);
+    return sliced.length>=2 ? sliced : polyline;
+  }
+
+  // ===== (개선) 라인명으로 ways 가져오기 (이름검색 모드용) =====
+  async function fetchRailLineWaysByName(lineName, kind){
+    const routeFilter = kind==='urban' ? 'subway|light_rail|tram|metro' : 'train|light_rail|railway';
+    const q = `
+      [out:json][timeout:60];
+      (
+        rel["route"~"${routeFilter}"]["name"~"${lineName}", i];
+        rel["route"~"${routeFilter}"]["ref" ~"${lineName}", i];
+      );
+      (._; >;);
+      out body geom;`;
+    const data = await fetchOverpass(q.trim());
+    const ways = (data.elements || []).filter(el => el.type === 'way' && el.geometry);
+    if (!ways.length) throw new Error('No railway ways found for: ' + lineName);
+    return ways;
+  }
+
+  // ===== (개선) 자동 픽 — 역 스냅 + ordered 조립 =====
+  async function autoPickRailPathAndMeta(startLL, endLL, kind){
+    // 1) 역/정류장으로 스냅
+    const sSnap = await snapToNearestStation(startLL.lat, startLL.lng, kind);
+    const eSnap = await snapToNearestStation(endLL.lat, endLL.lng, kind);
+
+    // 2) 반경을 넓혀가며 relation 교집합 찾기
+    const radii = [1500, 3000, 7000, 15000, 30000];
+    for (const R of radii){
+      const [nearS, nearE] = await Promise.all([
+        fetchRailRelationsNearPoint(sSnap.lat, sSnap.lng, R, kind),
+        fetchRailRelationsNearPoint(eSnap.lat, eSnap.lng, R, kind)
+      ]);
+      const mapS = new Map(nearS.map(r => [r.id, r]));
+      const setE = new Set(nearE.map(r => r.id));
+      const inter = [...mapS.keys()].filter(id => setE.has(id));
+      if (!inter.length) continue;
+
+      // 3) 후보들 중 가장 긴(=시작/끝 구간 포함) 경로 채택
+      let best = null, bestLen = 0, bestPath = null;
+      for (const id of inter.slice(0, 6)){ // 상위 6개만
+        try{
+          const ordered = await fetchRailLineByRelIdOrdered(id);
+          const clip   = clipPolylineByNearest(ordered, sSnap, eSnap);
+          // 길이 계산
+          let len=0; for (let i=0;i<clip.length-1;i++) len += haversine(clip[i], clip[i+1]);
+          if (len > bestLen){ bestLen=len; bestPath=clip; best=mapS.get(id); }
+        }catch(e){}
+      }
+      if (bestPath && bestPath.length>=2){
+        return { path: bestPath, relId: best.id, name: best.tags?.name || best.tags?.ref || ('rel '+best.id) };
+      }
+    }
+    return null;
+  }
+
+  // ===== 상태/최적화용 변수 =====
+  let routeLatLng=[], segs=[], total=0, progress=0, cumEnds=[];
+  let fullLine, traveledLine, marker, cam;
+  let animId=null, started=false, ready=false;
+  let t0=null;
+  let speedMps = (DEFAULT_SPEEDS[modeSel.value]||50)/3.6;
+  let lastDrawnPos = null, drawAcc = 0;
+  const DRAW_STEP_M = 15;
+
+  function clearRouteLayers(){
+    if(fullLine){ map.removeLayer(fullLine); fullLine=null; }
+    if(traveledLine){ map.removeLayer(traveledLine); traveledLine=null; }
+    if(marker){ map.removeLayer(marker); marker=null; }
+  }
+
+  // ===== 속도 동기화 =====
+  function setSpeedKmH(kmh, adjust=true){
+    kmh = Math.max(1, Math.min(1000000, Number(kmh)||1));
+    speedRange.value = kmh;
+    speedNumber.value = kmh;
+    if (adjust){
+      const now = performance.now();
+      t0 = now - (progress / (kmh/3.6)) * 1000;
+    }
+    speedMps = kmh / 3.6;
+  }
+  speedRange.addEventListener('input', ()=> setSpeedKmH(speedRange.value));
+  speedNumber.addEventListener('input', ()=> setSpeedKmH(speedNumber.value));
+
+  function toggleUI(){ document.body.classList.toggle('hide-chrome'); }
+  btnHide.addEventListener('click', toggleUI);
+  showUiBtn.addEventListener('click', toggleUI);
+
+  // 모드/마커 변경시 아이콘 새로고침
+  function makeMarkerIcon(){
+    let baseHTML = '';
+    if (markerType.value === 'url' && markerUrl.value.trim()){
+      const baseSize = 28;
+      baseHTML = `<img class="photo" src="${markerUrl.value.trim()}"
+                     style="width:${baseSize}px;height:${baseSize}px" decoding="async" fetchpriority="low"
+                     onerror="this.style.display='none'">`;
+    } else {
+      let emoji = markerEmoji.value;
+      if (emoji === 'auto'){
+        const m = modeSel.value;
+        emoji = m==='driving' ? '🚗' :
+                m==='walking' ? '🚶' :
+                m==='cycling' ? '🚴' :
+                (m.startsWith('train') ? '🚄' :
+                 m.startsWith('subway') ? '🚇' :
+                 m==='air' ? '✈️' : '📍');
+      }
+      baseHTML = `<div class="emoji">${emoji}</div>`;
+    }
+    const url = overlayUrl.value.trim();
+    const size = Math.max(12, Math.min(96, Number(overlaySize.value)||28));
+    const overlayHTML = url
+      ? `<img class="photo" src="${url}" style="width:${size}px;height:${size}px" decoding="async" fetchpriority="low"
+               onerror="this.style.display='none'">` : '';
+    const emojiPx = 24, gap = url ? 2 : 0;
+    const w = Math.max(size, emojiPx);
+    const h = (url ? size + gap : 0) + emojiPx;
+    const html = `<div class="stack">${overlayHTML}${baseHTML}</div>`.replace('class="stack"','class="stack-marker"');
+    return L.divIcon({ className:'stack-marker', html, iconSize:[w,h], iconAnchor:[w/2, h-2] });
+  }
+  function refreshMarkerIcon(){ if (marker) marker.setIcon(makeMarkerIcon()); }
+  [overlayUrl, overlaySize, markerType, markerEmoji, modeSel].forEach(el=> el.addEventListener('change', refreshMarkerIcon));
+  overlaySize.addEventListener('input', refreshMarkerIcon);
+  markerType.addEventListener('change', ()=>{
+    const byUrl = markerType.value==='url';
+    markerUrl.classList.toggle('hidden', !byUrl);
+    markerEmoji.classList.toggle('hidden', byUrl);
+  });
+
+  // 미니 컨트롤 상태/라벨 동기화
+  function syncMini(){
+    miniStart.disabled = btnStart.disabled;
+    miniPause.disabled = btnPause.disabled;
+    miniReset.disabled = btnReset.disabled;
+    miniBuild.disabled = btnBuild.disabled;
+    miniPause.textContent = btnPause.textContent;
+    miniStart.textContent = btnStart.textContent;
+  }
+  syncMini();
+
+  // 모드 선택 시 속도/아이콘/인풋 토글
+  modeSel.addEventListener('change', ()=>{
+    railLine.style.display = (modeSel.value==='train_osm' || modeSel.value==='subway_osm') ? 'inline-block' : 'none';
+    setSpeedKmH(DEFAULT_SPEEDS[modeSel.value]||50, false);
+    refreshMarkerIcon();
+    syncMini();
+  });
+
+  // ===== Build Route =====
+  async function buildRoute(){
+    try{
+      btnBuild.disabled = true; btnStart.disabled = true; btnPause.disabled = true; btnReset.disabled = true; syncMini();
+      statusEl.textContent = 'Building route…';
+
+      clearRouteLayers();
+      lastDrawnPos = null; drawAcc = 0;
+
+      let [s, e] = await Promise.all([
+        toLatLngFlexible(startInput.value.trim()),
+        toLatLngFlexible(endInput.value.trim())
+      ]);
+      if (!s || !e) throw new Error('Start/End invalid');
+
+      let useFallbackGC = false;
+
+      try {
+        if (modeSel.value==='driving' || modeSel.value==='walking' || modeSel.value==='cycling'){
+          const coords = await fetchRouteOSRM(modeSel.value, s, e);
+          routeLatLng = coords.map(([lng,lat])=>[lat,lng]);
+        } else if (modeSel.value==='train_osm'){
+          const name = (railLine.value || '').trim();
+          if (!name) throw new Error('Enter OSM rail line name.');
+          const ways = await fetchRailLineWaysByName(name, 'main');
+          // 스냅해서 클리핑 정확도 향상
+          const sSnap = await snapToNearestStation(s.lat, s.lng, 'main');
+          const eSnap = await snapToNearestStation(e.lat, e.lng, 'main');
+          const rail = assemblePolylineFromWays(ways);
+          routeLatLng = clipPolylineByNearest(rail, sSnap, eSnap);
+        } else if (modeSel.value==='subway_osm'){
+          const name = (railLine.value || '').trim();
+          if (!name) throw new Error('Enter OSM subway/metro line name.');
+          const ways = await fetchRailLineWaysByName(name, 'urban');
+          const sSnap = await snapToNearestStation(s.lat, s.lng, 'urban');
+          const eSnap = await snapToNearestStation(e.lat, e.lng, 'urban');
+          const rail = assemblePolylineFromWays(ways);
+          routeLatLng = clipPolylineByNearest(rail, sSnap, eSnap);
+        } else if (modeSel.value==='train_auto'){
+          const auto = await autoPickRailPathAndMeta(s, e, 'main');
+          if (auto) { routeLatLng = auto.path; statusEl.textContent = `Ready. Train: ${auto.name}`; }
+          else { routeLatLng = greatCircleRoute(s, e); useFallbackGC = true; }
+        } else if (modeSel.value==='subway_auto'){
+          const auto = await autoPickRailPathAndMeta(s, e, 'urban');
+          if (auto) { routeLatLng = auto.path; statusEl.textContent = `Ready. Subway: ${auto.name}`; }
+          else { routeLatLng = greatCircleRoute(s, e); useFallbackGC = true; }
+        } else if (modeSel.value==='train_gc' || modeSel.value==='air'){
+          routeLatLng = greatCircleRoute(s, e);
+        }
+      } catch (e) {
+        console.warn('Routing failed → fallback great-circle:', e);
+        routeLatLng = greatCircleRoute(s, e);
+        useFallbackGC = true;
+      }
+
+      // 최소 길이 보증 + 다운샘플링
+      if (!routeLatLng || routeLatLng.length < 2) {
+        routeLatLng = greatCircleRoute(s, e);
+        if (!routeLatLng || routeLatLng.length < 2) throw new Error('Route too short');
+      }
+      routeLatLng = decimateLine(routeLatLng, modeSel.value==='air' ? 150 : 60);
+
+      // 레이어 & 카메라 세팅
+      fullLine = L.polyline(routeLatLng, { color:'gray', weight:4, opacity:.6, renderer: canvasRenderer }).addTo(map);
+      traveledLine = L.polyline([routeLatLng[0]], { color:'#0077FF', weight:5, renderer: canvasRenderer }).addTo(map);
+      marker = L.marker(routeLatLng[0], { icon: makeMarkerIcon() }).addTo(map);
+
+      const bounds = fullLine.getBounds();
+      map.fitBounds(bounds, { padding:[40,40] });
+      await waitForMoveEndOrTimeout(800);
+      await new Promise(res => setTimeout(res, 120));
+
+      // 세그먼트/거리
+      segs=[]; total=0; cumEnds=[];
+      for(let i=0;i<routeLatLng.length-1;i++){
+        const a=routeLatLng[i], b=routeLatLng[i+1];
+        const d=haversine(a,b);
+        segs.push({a,b,d,cumStart:total,cumEnd:total+d});
+        total+=d; cumEnds.push(total);
+      }
+      progress=0; cam = routeLatLng[0].slice();
+      ready=true; started=false;
+      btnStart.disabled=false; btnPause.disabled=true; btnReset.disabled=false;
+
+      if (!useFallbackGC && !statusEl.textContent.startsWith('Ready')) {
+        statusEl.textContent = `Ready. Mode: ${modeSel.value}`;
+      }
+      setSpeedKmH(DEFAULT_SPEEDS[modeSel.value]||50, false);
+      syncMini();
+    }catch(e){
+      console.error(e);
+      statusEl.textContent = 'Build failed (geo/route/overpass). Check inputs or try again.';
+    }finally{
+      btnBuild.disabled = false; syncMini();
+    }
+  }
+
+  // ===== 애니메이션 =====
+  function animate(ts){
+    if(!t0) t0 = ts - (progress/speedMps)*1000;
+    const elapsed=(ts-t0)/1000;
+    progress = Math.min(speedMps*elapsed, total);
+
+    // 이진검색으로 세그먼트 찾기
+    let lo=0, hi=cumEnds.length-1, idx=hi;
+    while (lo<=hi){
+      const mid=(lo+hi)>>1;
+      if (progress<=cumEnds[mid]) { idx=mid; hi=mid-1; } else { lo=mid+1; }
+    }
+    const seg=segs[idx];
+    const segT=seg.d ? (progress-seg.cumStart)/seg.d : 1;
+    const pos=[ lerp(seg.a[0],seg.b[0],clamp01(segT)),
+                lerp(seg.a[1],seg.b[1],clamp01(segT)) ];
+
+    // 폴리라인은 일정 거리 누적 시에만 추가
+    if (lastDrawnPos){
+      drawAcc += haversine(lastDrawnPos, pos);
+      if (drawAcc >= DRAW_STEP_M){ traveledLine.addLatLng(pos); drawAcc=0; lastDrawnPos = pos; }
+    } else { traveledLine.addLatLng(pos); lastDrawnPos = pos; }
+
+    marker.setLatLng(pos);
+    cam = lerp2(cam, pos, 0.16);
+    map.setView(cam, map.getZoom(), { animate:false });
+
+    if (progress<total){
+      animId = requestAnimationFrame(animate);
+    } else {
+      started=false; animId=null;
+      btnStart.disabled=false; btnStart.textContent='Restart';
+      btnPause.disabled=true;  btnPause.textContent='Pause';
+      statusEl.textContent='Done.'; syncMini();
+    }
+  }
+
+  // ===== 공용 액션 =====
+  function canStart(){ return ready && !started; }
+  async function handleStart(){
+    if (!canStart()) return;
+    await new Promise(r=>setTimeout(r,100));
+    started = true; btnStart.disabled = true; btnPause.disabled = false;
+    statusEl.textContent = 'Playing…'; t0 = null; syncMini();
+    animId = requestAnimationFrame(animate);
+  }
+  function handlePauseResume(){
+    if (!ready) return;
+    if (animId){
+      cancelAnimationFrame(animId); animId=null; started=false;
+      btnPause.textContent='Resume'; btnStart.disabled=true; statusEl.textContent='Paused.';
+    } else {
+      started=true; btnPause.textContent='Pause'; btnStart.disabled=true; statusEl.textContent='Playing…';
+      t0=null; animId=requestAnimationFrame(animate);
+    }
+    syncMini();
+  }
+  function handleReset(){
+    if (animId) cancelAnimationFrame(animId);
+    animId=null; started=false; progress=0; t0=null;
+    if(routeLatLng.length){
+      traveledLine.setLatLngs([routeLatLng[0]]);
+      marker.setLatLng(routeLatLng[0]);
+      cam = routeLatLng[0].slice();
+      map.setView(cam, map.getZoom(), { animate:false });
+    }
+    lastDrawnPos = null; drawAcc = 0;
+    btnStart.disabled=!ready; btnStart.textContent='Start';
+    btnPause.disabled=true; btnPause.textContent='Pause';
+    statusEl.textContent='Ready.'; syncMini();
+  }
+  async function handleBuild(){ await buildRoute(); syncMini(); }
+
+  // ===== 이벤트 바인딩 =====
+  btnBuild.addEventListener('click', handleBuild);
+  btnStart.addEventListener('click', handleStart);
+  btnPause.addEventListener('click', handlePauseResume);
+  btnReset.addEventListener('click', handleReset);
+
+  miniBuild.addEventListener('click', handleBuild);
+  miniStart.addEventListener('click', handleStart);
+  miniPause.addEventListener('click', handlePauseResume);
+  miniReset.addEventListener('click', handleReset);
+
+  startInput.addEventListener('keydown', e => { if(e.key==='Enter') handleBuild(); });
+  endInput  .addEventListener('keydown', e => { if(e.key==='Enter') handleBuild(); });
+
+  // 초기 속도
+  setSpeedKmH(DEFAULT_SPEEDS[modeSel.value]||50, false);
+}
+</script>
+</body>
+</html>
